@@ -1,0 +1,299 @@
+// 🌙 Moon Dev's Grid Trading Indicator
+// Detects choppy markets and shows grid levels for buy/sell signals
+// Version: 1.0
+// Built with love by Moon Dev 🚀
+
+//@version=5
+indicator("🌙 Grid Chop Trading", overlay=true, max_lines_count=500, max_labels_count=500)
+
+// ====== USER INPUTS ======
+// Grid Configuration
+grid_levels = input.int(5, "Grid Levels", minval=1, maxval=10, tooltip="Number of buy/sell levels above and below current price")
+grid_spacing = input.float(1.5, "Grid Spacing %", minval=0.5, maxval=5.0, step=0.1, tooltip="Percentage spacing between grid levels")
+profit_target = input.float(1.0, "Profit Target %", minval=0.1, maxval=5.0, step=0.1, tooltip="Take profit target per grid trade")
+
+// Market Detection
+chop_threshold = input.float(61.8, "Chop Threshold", minval=50, maxval=100, tooltip="Choppiness Index above this = choppy market")
+adx_threshold = input.float(25, "ADX Threshold", minval=10, maxval=50, tooltip="ADX below this = weak trend")
+lookback = input.int(20, "Range Lookback", minval=10, maxval=50, tooltip="Bars to calculate price range")
+min_range = input.float(2.0, "Min Range Width %", minval=0.5, maxval=10.0, tooltip="Minimum range width to enable grid")
+
+// Visual Options
+show_grid = input.bool(true, "Show Grid Lines", tooltip="Display buy/sell grid levels on chart")
+show_range = input.bool(true, "Show Range", tooltip="Display high/low range box")
+show_signals = input.bool(true, "Show Signals", tooltip="Display buy/sell signal markers")
+show_dashboard = input.bool(true, "Show Dashboard", tooltip="Display market condition dashboard")
+
+// Alert Options
+alert_on_chop = input.bool(true, "Alert on Choppy Market", tooltip="Alert when market becomes choppy")
+alert_on_trend = input.bool(true, "Alert on Trending Market", tooltip="Alert when market starts trending")
+alert_on_buy = input.bool(true, "Alert on Buy Signal", tooltip="Alert on grid buy signals")
+alert_on_sell = input.bool(true, "Alert on Sell Signal", tooltip="Alert on grid sell signals")
+
+// ====== INDICATOR CALCULATIONS ======
+
+// Choppiness Index (CI)
+calc_ci(length) =>
+    atr_sum = math.sum(ta.atr(1), length)
+    high_low_range = ta.highest(high, length) - ta.lowest(low, length)
+    ci = 100 * math.log10(atr_sum / high_low_range) / math.log10(length)
+    ci
+
+ci = calc_ci(14)
+
+// ADX
+[diplus, diminus, adx] = ta.dmi(14, 14)
+
+// Range Calculation
+range_high = ta.highest(high, lookback)
+range_low = ta.lowest(low, lookback)
+range_mid = (range_high + range_low) / 2
+range_width = range_high - range_low
+range_width_pct = (range_width / close) * 100
+
+// ====== MARKET CONDITION DETECTION ======
+is_choppy = ci > chop_threshold and adx < adx_threshold
+is_trending = ci < chop_threshold or adx > adx_threshold
+range_valid = range_width_pct >= min_range
+grid_enabled = is_choppy and range_valid
+
+// Track state changes
+var bool was_choppy = false
+choppy_started = grid_enabled and not was_choppy
+trending_started = not grid_enabled and was_choppy
+was_choppy := grid_enabled
+
+// ====== GRID LEVEL CALCULATIONS ======
+var float[] buy_levels = array.new_float(0)
+var float[] sell_levels = array.new_float(0)
+
+if grid_enabled
+    // Clear old levels
+    array.clear(buy_levels)
+    array.clear(sell_levels)
+
+    // Calculate buy levels below current price
+    for i = 1 to grid_levels
+        level = close * (1 - (grid_spacing / 100) * i)
+        if level > range_low
+            array.push(buy_levels, level)
+
+    // Calculate sell levels above current price
+    for i = 1 to grid_levels
+        level = close * (1 + (grid_spacing / 100) * i)
+        if level < range_high
+            array.push(sell_levels, level)
+
+// ====== SIGNAL DETECTION ======
+var float last_buy_level = na
+var float last_sell_level = na
+
+buy_signal = false
+sell_signal = false
+buy_price = 0.0
+sell_price = 0.0
+
+if grid_enabled and show_signals
+    // Check if price crossed any buy level
+    for i = 0 to array.size(buy_levels) - 1
+        level = array.get(buy_levels, i)
+        // Buy signal when price drops to or below level
+        if ta.crossunder(close, level) or (low <= level and close >= level * 0.999)
+            if na(last_buy_level) or level != last_buy_level
+                buy_signal := true
+                buy_price := level
+                last_buy_level := level
+
+    // Check if price crossed any sell level
+    for i = 0 to array.size(sell_levels) - 1
+        level = array.get(sell_levels, i)
+        // Sell signal when price rises to or above level
+        if ta.crossover(close, level) or (high >= level and close <= level * 1.001)
+            if na(last_sell_level) or level != last_sell_level
+                sell_signal := true
+                sell_price := level
+                last_sell_level := level
+
+// Reset tracking when grid disables
+if not grid_enabled
+    last_buy_level := na
+    last_sell_level := na
+
+// ====== PLOTTING ======
+
+// Background color based on market condition
+bgcolor(grid_enabled ? color.new(color.green, 95) : color.new(color.red, 95), title="Market Condition BG")
+
+// Range Box
+if show_range and grid_enabled
+    var box range_box = na
+    box.delete(range_box)
+    range_box := box.new(
+         left=bar_index - lookback,
+         top=range_high,
+         right=bar_index,
+         bottom=range_low,
+         border_color=color.new(color.blue, 70),
+         bgcolor=color.new(color.blue, 95),
+         border_width=1,
+         text="Range: " + str.tostring(range_width_pct, "#.##") + "%",
+         text_color=color.blue,
+         text_size=size.small
+     )
+
+// Grid Lines
+if show_grid and grid_enabled
+    // Draw buy levels (green)
+    for i = 0 to array.size(buy_levels) - 1
+        level = array.get(buy_levels, i)
+        line.new(
+             x1=bar_index - 5,
+             y1=level,
+             x2=bar_index + 20,
+             y2=level,
+             color=color.new(color.green, 50),
+             width=1,
+             style=line.style_dashed,
+             extend=extend.none
+         )
+        // Label for buy level
+        label.new(
+             x=bar_index + 20,
+             y=level,
+             text="Buy " + str.tostring(i+1) + ": " + str.tostring(level, "#.####"),
+             color=color.new(color.green, 80),
+             textcolor=color.green,
+             size=size.tiny,
+             style=label.style_label_left
+         )
+
+    // Draw sell levels (red)
+    for i = 0 to array.size(sell_levels) - 1
+        level = array.get(sell_levels, i)
+        line.new(
+             x1=bar_index - 5,
+             y1=level,
+             x2=bar_index + 20,
+             y2=level,
+             color=color.new(color.red, 50),
+             width=1,
+             style=line.style_dashed,
+             extend=extend.none
+         )
+        // Label for sell level
+        label.new(
+             x=bar_index + 20,
+             y=level,
+             text="Sell " + str.tostring(i+1) + ": " + str.tostring(level, "#.####"),
+             color=color.new(color.red, 80),
+             textcolor=color.red,
+             size=size.tiny,
+             style=label.style_label_left
+         )
+
+// Signal Markers
+plotshape(
+     buy_signal and show_signals,
+     title="Buy Signal",
+     location=location.belowbar,
+     color=color.new(color.green, 0),
+     style=shape.triangleup,
+     size=size.small,
+     text="BUY"
+ )
+
+plotshape(
+     sell_signal and show_signals,
+     title="Sell Signal",
+     location=location.abovebar,
+     color=color.new(color.red, 0),
+     style=shape.triangledown,
+     size=size.small,
+     text="SELL"
+ )
+
+// Market condition markers
+plotshape(
+     choppy_started,
+     title="Choppy Market Started",
+     location=location.bottom,
+     color=color.new(color.aqua, 0),
+     style=shape.circle,
+     size=size.tiny,
+     text="CHOP"
+ )
+
+plotshape(
+     trending_started,
+     title="Trending Market Started",
+     location=location.bottom,
+     color=color.new(color.orange, 0),
+     style=shape.circle,
+     size=size.tiny,
+     text="TREND"
+ )
+
+// ====== DASHBOARD ======
+if show_dashboard
+    var table dashboard = table.new(position.top_right, 2, 8, border_width=2)
+
+    // Header
+    table.cell(dashboard, 0, 0, "🌙 Grid Chop", bgcolor=color.new(color.blue, 80), text_color=color.white, text_size=size.normal)
+    table.cell(dashboard, 1, 0, grid_enabled ? "ACTIVE 🟢" : "INACTIVE 🔴",
+         bgcolor=grid_enabled ? color.new(color.green, 80) : color.new(color.red, 80),
+         text_color=color.white, text_size=size.normal)
+
+    // Market Metrics
+    table.cell(dashboard, 0, 1, "Chop Index", text_size=size.small)
+    table.cell(dashboard, 1, 1, str.tostring(ci, "#.#"),
+         text_color=ci > chop_threshold ? color.green : color.red, text_size=size.small)
+
+    table.cell(dashboard, 0, 2, "ADX", text_size=size.small)
+    table.cell(dashboard, 1, 2, str.tostring(adx, "#.#"),
+         text_color=adx < adx_threshold ? color.green : color.red, text_size=size.small)
+
+    table.cell(dashboard, 0, 3, "Range Width", text_size=size.small)
+    table.cell(dashboard, 1, 3, str.tostring(range_width_pct, "#.##") + "%",
+         text_color=range_valid ? color.green : color.red, text_size=size.small)
+
+    // Grid Info
+    table.cell(dashboard, 0, 4, "Buy Levels", text_size=size.small)
+    table.cell(dashboard, 1, 4, str.tostring(array.size(buy_levels)), text_color=color.green, text_size=size.small)
+
+    table.cell(dashboard, 0, 5, "Sell Levels", text_size=size.small)
+    table.cell(dashboard, 1, 5, str.tostring(array.size(sell_levels)), text_color=color.red, text_size=size.small)
+
+    table.cell(dashboard, 0, 6, "Grid Spacing", text_size=size.small)
+    table.cell(dashboard, 1, 6, str.tostring(grid_spacing, "#.#") + "%", text_size=size.small)
+
+    table.cell(dashboard, 0, 7, "Profit Target", text_size=size.small)
+    table.cell(dashboard, 1, 7, str.tostring(profit_target, "#.#") + "%", text_size=size.small)
+
+// ====== ALERTS ======
+
+// Alert for choppy market start
+alertcondition(choppy_started and alert_on_chop,
+     title="Choppy Market Started",
+     message="🌊 CHOPPY MARKET DETECTED! Grid trading conditions met. CI={{plot_0}}, ADX={{plot_1}}")
+
+// Alert for trending market start
+alertcondition(trending_started and alert_on_trend,
+     title="Trending Market Started",
+     message="📈 TRENDING MARKET! Exiting grid positions. CI={{plot_0}}, ADX={{plot_1}}")
+
+// Alert for buy signals
+alertcondition(buy_signal and alert_on_buy,
+     title="Grid Buy Signal",
+     message="🟢 GRID BUY SIGNAL at {{close}}! Target: +{{plot_2}}%")
+
+// Alert for sell signals
+alertcondition(sell_signal and alert_on_sell,
+     title="Grid Sell Signal",
+     message="🔴 GRID SELL SIGNAL at {{close}}! Target: +{{plot_2}}%")
+
+// Plot values for alerts (invisible)
+plot(ci, title="CI", display=display.none)
+plot(adx, title="ADX", display=display.none)
+plot(profit_target, title="Profit Target", display=display.none)
+
+// ====== END OF INDICATOR ======

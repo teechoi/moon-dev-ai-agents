@@ -1,0 +1,211 @@
+// 🌙 Moon Dev's Grid Trading Strategy (Backtestable)
+// Automated grid trading for choppy/sideways markets
+// Version: 1.0
+// Built with love by Moon Dev 🚀
+
+//@version=5
+strategy("🌙 Grid Chop Strategy", overlay=true, initial_capital=10000, default_qty_type=strategy.percent_of_equity, default_qty_value=10, commission_type=strategy.commission.percent, commission_value=0.2, slippage=2)
+
+// ====== USER INPUTS ======
+// Grid Configuration
+grid_levels = input.int(5, "Grid Levels", minval=1, maxval=10, group="Grid Settings", tooltip="Number of buy/sell levels")
+grid_spacing = input.float(1.5, "Grid Spacing %", minval=0.5, maxval=5.0, step=0.1, group="Grid Settings", tooltip="Percentage spacing between levels")
+profit_target = input.float(1.0, "Profit Target %", minval=0.1, maxval=5.0, step=0.1, group="Grid Settings", tooltip="Take profit per trade")
+
+// Market Detection
+chop_threshold = input.float(61.8, "Chop Threshold", minval=50, maxval=100, group="Market Detection", tooltip="CI above this = choppy")
+adx_threshold = input.float(25, "ADX Threshold", minval=10, maxval=50, group="Market Detection", tooltip="ADX below this = weak trend")
+lookback = input.int(20, "Range Lookback", minval=10, maxval=50, group="Market Detection", tooltip="Bars for range calculation")
+min_range = input.float(2.0, "Min Range Width %", minval=0.5, maxval=10.0, group="Market Detection", tooltip="Minimum range to trade")
+
+// Risk Management
+max_positions = input.int(10, "Max Grid Positions", minval=1, maxval=20, group="Risk Management", tooltip="Maximum concurrent positions")
+position_size_pct = input.float(10, "Position Size %", minval=1, maxval=100, step=1, group="Risk Management", tooltip="% of equity per grid trade")
+use_stop_loss = input.bool(false, "Use Stop Loss", group="Risk Management", tooltip="Enable stop loss")
+stop_loss_pct = input.float(3.0, "Stop Loss %", minval=0.5, maxval=10.0, step=0.5, group="Risk Management", tooltip="Stop loss percentage")
+
+// Visual Options
+show_grid = input.bool(true, "Show Grid Lines", group="Display")
+show_signals = input.bool(true, "Show Entry/Exit", group="Display")
+
+// ====== INDICATOR CALCULATIONS ======
+
+// Choppiness Index (CI)
+calc_ci(length) =>
+    atr_sum = math.sum(ta.atr(1), length)
+    high_low_range = ta.highest(high, length) - ta.lowest(low, length)
+    ci = 100 * math.log10(atr_sum / high_low_range) / math.log10(length)
+    ci
+
+ci = calc_ci(14)
+
+// ADX
+[diplus, diminus, adx] = ta.dmi(14, 14)
+
+// Range Calculation
+range_high = ta.highest(high, lookback)
+range_low = ta.lowest(low, lookback)
+range_width = range_high - range_low
+range_width_pct = (range_width / close) * 100
+
+// ====== MARKET CONDITION ======
+is_choppy = ci > chop_threshold and adx < adx_threshold
+range_valid = range_width_pct >= min_range
+grid_enabled = is_choppy and range_valid
+
+// ====== GRID CALCULATIONS ======
+var float[] buy_levels = array.new_float(0)
+var float[] sell_levels = array.new_float(0)
+
+if bar_index % 5 == 0  // Recalculate every 5 bars for performance
+    array.clear(buy_levels)
+    array.clear(sell_levels)
+
+    if grid_enabled
+        // Buy levels below price
+        for i = 1 to grid_levels
+            level = close * (1 - (grid_spacing / 100) * i)
+            if level > range_low
+                array.push(buy_levels, level)
+
+        // Sell levels above price
+        for i = 1 to grid_levels
+            level = close * (1 + (grid_spacing / 100) * i)
+            if level < range_high
+                array.push(sell_levels, level)
+
+// ====== STRATEGY LOGIC ======
+
+// Track positions to avoid duplicates at same level
+var float[] active_long_levels = array.new_float(0)
+var float[] active_short_levels = array.new_float(0)
+
+// Clean up closed position levels
+if strategy.position_size == 0
+    array.clear(active_long_levels)
+    array.clear(active_short_levels)
+
+// Check position count
+current_positions = math.abs(strategy.position_size / (strategy.initial_capital * position_size_pct / 100 / close))
+
+// === ENTRY CONDITIONS ===
+if grid_enabled and current_positions < max_positions
+
+    // Check buy levels
+    for i = 0 to array.size(buy_levels) - 1
+        buy_level = array.get(buy_levels, i)
+
+        // Check if we don't already have a position at this level
+        level_exists = false
+        for j = 0 to array.size(active_long_levels) - 1
+            if math.abs(array.get(active_long_levels, j) - buy_level) < close * 0.001
+                level_exists := true
+                break
+
+        // Enter long if price touches level
+        if not level_exists and low <= buy_level and close >= buy_level * 0.995
+            take_profit_price = buy_level * (1 + profit_target / 100)
+            stop_loss_price = use_stop_loss ? buy_level * (1 - stop_loss_pct / 100) : na
+
+            strategy.entry("Long_" + str.tostring(i), strategy.long,
+                 qty=strategy.equity * position_size_pct / 100 / close,
+                 comment="Buy Grid " + str.tostring(i+1))
+
+            // Set take profit
+            strategy.exit("TP_Long_" + str.tostring(i), "Long_" + str.tostring(i),
+                 limit=take_profit_price,
+                 stop=stop_loss_price,
+                 comment="TP " + str.tostring(profit_target) + "%")
+
+            array.push(active_long_levels, buy_level)
+
+    // Check sell levels (short positions)
+    for i = 0 to array.size(sell_levels) - 1
+        sell_level = array.get(sell_levels, i)
+
+        // Check if we don't already have a position at this level
+        level_exists = false
+        for j = 0 to array.size(active_short_levels) - 1
+            if math.abs(array.get(active_short_levels, j) - sell_level) < close * 0.001
+                level_exists := true
+                break
+
+        // Enter short if price touches level
+        if not level_exists and high >= sell_level and close <= sell_level * 1.005
+            take_profit_price = sell_level * (1 - profit_target / 100)
+            stop_loss_price = use_stop_loss ? sell_level * (1 + stop_loss_pct / 100) : na
+
+            strategy.entry("Short_" + str.tostring(i), strategy.short,
+                 qty=strategy.equity * position_size_pct / 100 / close,
+                 comment="Sell Grid " + str.tostring(i+1))
+
+            // Set take profit
+            strategy.exit("TP_Short_" + str.tostring(i), "Short_" + str.tostring(i),
+                 limit=take_profit_price,
+                 stop=stop_loss_price,
+                 comment="TP " + str.tostring(profit_target) + "%")
+
+            array.push(active_short_levels, sell_level)
+
+// === EXIT CONDITIONS ===
+// Close all positions when market becomes trending
+if not grid_enabled and strategy.position_size != 0
+    strategy.close_all(comment="Market Trending - Exit Grid")
+    array.clear(active_long_levels)
+    array.clear(active_short_levels)
+
+// ====== PLOTTING ======
+
+// Background color
+bgcolor(grid_enabled ? color.new(color.green, 95) : color.new(color.red, 95))
+
+// Grid lines
+if show_grid and grid_enabled
+    // Buy levels
+    for i = 0 to array.size(buy_levels) - 1
+        level = array.get(buy_levels, i)
+        line.new(bar_index - 5, level, bar_index + 10, level,
+             color=color.new(color.green, 60), width=1, style=line.style_dashed)
+
+    // Sell levels
+    for i = 0 to array.size(sell_levels) - 1
+        level = array.get(sell_levels, i)
+        line.new(bar_index - 5, level, bar_index + 10, level,
+             color=color.new(color.red, 60), width=1, style=line.style_dashed)
+
+// Range box
+if show_grid and grid_enabled
+    var box range_box = na
+    box.delete(range_box)
+    range_box := box.new(bar_index - lookback, range_high, bar_index, range_low,
+         border_color=color.new(color.blue, 70), bgcolor=color.new(color.blue, 95))
+
+// Metrics
+var table metrics = table.new(position.top_right, 2, 5, border_width=1)
+if barstate.islast
+    table.cell(metrics, 0, 0, "Grid Status", bgcolor=color.new(color.gray, 80), text_color=color.white)
+    table.cell(metrics, 1, 0, grid_enabled ? "ACTIVE ✅" : "INACTIVE ❌",
+         bgcolor=grid_enabled ? color.new(color.green, 80) : color.new(color.red, 80),
+         text_color=color.white)
+
+    table.cell(metrics, 0, 1, "CI", text_size=size.small)
+    table.cell(metrics, 1, 1, str.tostring(ci, "#.#"),
+         text_color=ci > chop_threshold ? color.green : color.red, text_size=size.small)
+
+    table.cell(metrics, 0, 2, "ADX", text_size=size.small)
+    table.cell(metrics, 1, 2, str.tostring(adx, "#.#"),
+         text_color=adx < adx_threshold ? color.green : color.red, text_size=size.small)
+
+    table.cell(metrics, 0, 3, "Range %", text_size=size.small)
+    table.cell(metrics, 1, 3, str.tostring(range_width_pct, "#.##") + "%",
+         text_color=range_valid ? color.green : color.red, text_size=size.small)
+
+    table.cell(metrics, 0, 4, "Positions", text_size=size.small)
+    table.cell(metrics, 1, 4, str.tostring(current_positions, "#"),
+         text_color=current_positions > 0 ? color.blue : color.gray, text_size=size.small)
+
+// Plot for strategy tester
+plot(ci, "Choppiness Index", color=color.new(color.orange, 80), display=display.none)
+plot(adx, "ADX", color=color.new(color.purple, 80), display=display.none)
+
+// ====== END OF STRATEGY ======
